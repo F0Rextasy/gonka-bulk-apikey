@@ -35,8 +35,17 @@ function arg(name, fallback) {
 }
 
 function pool() {
-  const file = arg('pool', null);
+  // Order: --pool, then GONKA_PROXIES (what the launcher sets), then a local proxies.txt.
+  const explicit = arg('pool', null);
+  let file = explicit || process.env.GONKA_PROXIES || null;
+  if (!file && fs.existsSync('proxies.txt')) file = 'proxies.txt';
   if (!file) return null;
+  if (!fs.existsSync(String(file))) {
+    // The launcher's default name exists only once the user creates it; a missing
+    // default means "run direct", a missing --pool is a user error.
+    if (explicit) throw new Error(`pool ${file} not found`);
+    return null;
+  }
   const lines = fs
     .readFileSync(String(file), 'utf8')
     .split(/\r?\n/)
@@ -168,6 +177,58 @@ async function waitLink(mail, px, timeoutMs = 180000) {
 
 const { launchBrowser, signup } = require('./solver');
 
+/** One account: mailbox → browser signup → verify → login → wallet → key. */
+async function mintOne({ px, index, total, log }) {
+  const mail = await makeMailbox(px);
+  const password = 'Gn!' + rand(10) + 'aQ9#';
+  log(`[${index}/${total}] mailbox ${mail.address}`);
+
+  const browser = await launchBrowser({ px, headless: !!arg('headless', false) });
+  try {
+    const result = await signup({ browser, mail: mail.address, password, px, log });
+    const status = result ? result.status : 0;
+    if (status !== 201) throw new Error(`signup ${status || 'no-response'}`);
+
+    const link = await waitLink(mail, px);
+    if (!link) throw new Error('verification link not found in mailbox');
+    const token = (link.match(/token=([0-9a-f]+)/i) || [])[1] || '';
+    const verify = await req(`${APP}/api/auth/verify-email?token=${token}`, { px });
+    log(`   verify → ${verify.status}`);
+
+    const json = { 'content-type': 'application/json', origin: APP, referer: APP + '/signin' };
+    const login = await req(`${APP}/api/auth/login`, {
+      px,
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ email: mail.address, password }),
+    });
+    let access = null;
+    try {
+      access = JSON.parse(login.text).accessToken;
+    } catch {
+      /* handled below */
+    }
+    if (!access) throw new Error(`login ${login.status} ${String(login.text).slice(0, 120)}`);
+
+    const wallet = await req(`${APP}/api/wallets`, {
+      px,
+      method: 'POST',
+      headers: { ...json, authorization: `Bearer ${access}` },
+      body: JSON.stringify({ name: 'w-' + rand(6), type: 'proxy' }),
+    });
+    let key = null;
+    try {
+      key = JSON.parse(wallet.text).secretKey;
+    } catch {
+      /* handled below */
+    }
+    if (!key) throw new Error(`wallet ${wallet.status} ${String(wallet.text).slice(0, 120)}`);
+    return { key, mail: mail.address };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 /** The key only counts once it answers a real completion. */
 async function prove(key, px) {
   const headers = { authorization: `Bearer ${key}`, 'content-type': 'application/json' };
@@ -238,19 +299,49 @@ async function mint({ count, log }) {
     console.log('  --pool FILE proxy list, one per line; each account is pinned to one line');
     console.log('  --headless  headless Chrome (default: visible window)');
     console.log('  --dry       print the plan, change nothing');
+    console.log('  --verify    re-check keys.txt against the live API, dead keys go to keys-dead.txt');
+    console.log('  --screen    probe every proxy line in the pool and report which ones reach the provider');
     return;
   }
   if (arg('verify', false)) {
-    const lines = require('fs').existsSync(OUT) ? require('fs').readFileSync(OUT, 'utf8').trim().split(/\r?\n/).filter(Boolean) : [];
-    let live = 0, dead = 0;
+    const lines = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8').trim().split(/\r?\n/).filter(Boolean) : [];
+    const poolLines = pool();
+    let live = 0;
+    let dead = 0;
     for (const key of lines) {
-      const proof = await prove(key, null).catch(() => ({ ok: false, why: 'error' }));
-      if (proof.ok) { live++; log('LIVE ' + key.slice(0, 16) + '… · ' + proof.model); }
-      else { dead++; require('fs').appendFileSync('keys-dead.txt', key + '\t' + new Date().toISOString() + '\t' + (proof.why || 'failed chat gate') + '\n'); log('DEAD ' + key.slice(0, 16) + '…'); }
+      const px = poolLines ? parseProxy(poolLines[(Math.random() * poolLines.length) | 0]) : null;
+      const proof = await prove(key, px).catch(() => ({ ok: false, why: 'error' }));
+      if (proof.ok) {
+        live++;
+        log('LIVE ' + key.slice(0, 16) + '… · ' + proof.model);
+      } else {
+        dead++;
+        fs.appendFileSync('keys-dead.txt', key + '\t' + new Date().toISOString() + '\t' + (proof.why || 'failed chat gate') + '\n');
+        log('DEAD ' + key.slice(0, 16) + '…');
+      }
       await sleep(3000);
     }
     log('');
     log('live ' + live + ' · dead ' + dead + (dead ? ' (moved to keys-dead.txt)' : ''));
+    return;
+  }
+  if (arg('screen', false)) {
+    const poolLines = pool();
+    if (!poolLines) throw new Error('--screen needs --pool FILE (or a proxies.txt next to the CLI)');
+    let up = 0;
+    for (const line of poolLines) {
+      const px = parseProxy(line);
+      try {
+        const r = await req(APP, { px, timeoutMs: 20000 });
+        const ok = r.status > 0 && r.status < 500;
+        if (ok) up++;
+        log((ok ? 'UP   ' : 'DOWN ') + px.host + ':' + px.port + ' → ' + r.status);
+      } catch (e) {
+        log('DOWN ' + px.host + ':' + px.port + ' → ' + String((e && e.message) || e).slice(0, 60));
+      }
+    }
+    log('');
+    log('reachable ' + up + '/' + poolLines.length);
     return;
   }
   const count = Number(arg('count', 1)) || 1;

@@ -47,10 +47,18 @@ function saveConfig(cfg) {
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+// A piped answer can arrive before the next question is asked and readline drops
+// lines nobody listens for, so both a TTY and `printf |` need a queue.
+const inputQueue = [];
+const inputWaiters = [];
+rl.on('line', (line) => (inputWaiters.length ? inputWaiters.shift()(line) : inputQueue.push(line)));
 const ask = (question, fallback) =>
   new Promise((resolve) => {
     const hint = fallback ? ` [${String(fallback).slice(0, 30)}${String(fallback).length > 30 ? '…' : ''}]` : '';
-    rl.question(`  ${question}${hint}: `, (answer) => resolve(answer.trim() || fallback || ''));
+    process.stdout.write(`  ${question}${hint}: `);
+    const done = (answer) => resolve(String(answer == null ? '' : answer).trim() || fallback || '');
+    if (inputQueue.length) return done(inputQueue.shift());
+    inputWaiters.push(done);
   });
 
 function run(args, env = {}) {
@@ -98,22 +106,23 @@ function banner() {
 }
 
 async function mintFlow(cfg) {
+  // One question only: the README (all ten languages) promises that minting asks a
+  // count and nothing else, so proxy/model stay at their settings values.
   cfg.count = parseInt(await ask('How many accounts/keys do you want (any number)', cfg.count), 10) || cfg.count;
-  cfg.proxyFile = await ask('Proxy list file (one proxy per line)', cfg.proxyFile);
-  cfg.model = await ask('Model used for the live verification', cfg.model);
   saveConfig(cfg);
-
-  if (!fs.existsSync(path.resolve(ROOT, cfg.proxyFile)) && !fs.existsSync(cfg.proxyFile)) {
+  const proxyPath = path.resolve(ROOT, cfg.proxyFile);
+  const havePool = fs.existsSync(proxyPath);
+  if (!havePool) {
     console.log(`  ! ${cfg.proxyFile} not found — running WITHOUT a proxy (direct)`);
     console.log('    (put one exit per line there to route through proxies: http://host:port, socks5://host:port or host:port)');
   }
-  run(['--auto', '--count', String(cfg.count), '--model', cfg.model], { ['GONKA_PROXIES']: cfg.proxyFile });
+  run(['--auto', '--count', String(cfg.count), ...(havePool ? ['--pool', cfg.proxyFile] : [])]);
 }
 
 async function verifyFlow(cfg) {
   cfg.proxyFile = await ask('Proxy list file', cfg.proxyFile);
   saveConfig(cfg);
-  run(['--verify-only'], { ['GONKA_PROXIES']: cfg.proxyFile });
+  run(['--verify'], { ['GONKA_PROXIES']: cfg.proxyFile });
 }
 
 async function screenFlow(cfg) {
