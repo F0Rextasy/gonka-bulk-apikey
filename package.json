@@ -1,0 +1,37 @@
+{
+  "name": "gonka-bulk-apikey",
+  "version": "1.0.0",
+  "description": "Bulk-create Gonka Broker accounts and API keys — OpenAI-compatible inference from proxy.gonkabroker.com, plus a 9Router connector.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "gonka-bulk-apikey": "src/cli.js",
+    "gonka-bulk-apikey-launcher": "src/launcher.js"
+  },
+  "main": "src/cli.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/launcher.js",
+    "mint": "node src/cli.js --auto",
+    "9router": "node src/connect-9router.js",
+    "omniroute": "node src/connect-omniroute.js"
+  },
+  "keywords": [
+    "api-key",
+    "bulk",
+    "register",
+    "launcher",
+    "gonka",
+    "apikey"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "puppeteer-core": "^24.9.0"
+  }
+}
